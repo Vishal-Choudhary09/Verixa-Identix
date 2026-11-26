@@ -569,7 +569,6 @@ document.addEventListener(
                             }
                         );
 
-
                     const data =
                         await response.json();
 

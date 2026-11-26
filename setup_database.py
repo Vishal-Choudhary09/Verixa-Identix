@@ -141,6 +141,7 @@ def create_database():
             doc_type TEXT NOT NULL,
             filename TEXT NOT NULL,
             original_name TEXT NOT NULL,
+            ocr_result TEXT,
 
             FOREIGN KEY(verification_id)
                 REFERENCES verifications(id)

@@ -377,7 +377,11 @@ Verification | Identix
                 type="submit"
                 class="btn btn-primary"
             >
-                Submit for Review →
+                {% if resubmission_required %}
+                    Resubmit for Review →
+                {% else %}
+                    Submit for Review →
+                {% endif %}
             </button>
 
         </div>
@@ -406,6 +410,11 @@ Verification | Identix
             value="HIGHER_SEMESTER_ADMISSION"
         >
 
+        {% if form_error %}
+            <div class="alert alert-error" role="alert">
+                {{ form_error }}
+            </div>
+        {% endif %}
 
         <div class="section-title-row">
 
@@ -684,6 +693,10 @@ Verification | Identix
 
                 </div>
 
+                <small class="field-help">
+                    OCR reads available student details, GPA values, and subject results for administrator review.
+                </small>
+
             </div>
 
 
@@ -726,6 +739,10 @@ Verification | Identix
 
                 </div>
 
+                <small class="field-help">
+                    The printed name and USN must match your student record and application. Upload a clear ID card showing both.
+                </small>
+
             </div>
 
         </div>
@@ -744,7 +761,11 @@ Verification | Identix
                 type="submit"
                 class="btn btn-primary"
             >
-                Submit for Review →
+                {% if resubmission_required %}
+                    Resubmit for Review →
+                {% else %}
+                    Submit for Review →
+                {% endif %}
             </button>
 
         </div>

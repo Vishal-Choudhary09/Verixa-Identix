@@ -470,7 +470,7 @@ Review Application | Identix
                     </span>
 
                     <h3>
-                        OCR comparison
+                        Student ID card comparison
                     </h3>
 
                 </div>
@@ -482,10 +482,16 @@ Review Application | Identix
                         Match
                     </span>
 
-                {% else %}
+                {% elif verification['match_status'] == 'MISMATCH' %}
 
                     <span class="status-badge status-rejected">
                         Mismatch
+                    </span>
+
+                {% else %}
+
+                    <span class="status-badge">
+                        OCR not detected
                     </span>
 
                 {% endif %}
@@ -531,7 +537,7 @@ Review Application | Identix
                         class="
                             {% if verification['match_status'] == 'MATCH' %}
                                 text-success
-                            {% else %}
+                            {% elif verification['match_status'] == 'MISMATCH' %}
                                 text-danger
                             {% endif %}
                         "
@@ -539,8 +545,10 @@ Review Application | Identix
 
                         {% if verification['match_status'] == 'MATCH' %}
                             Match
-                        {% else %}
+                        {% elif verification['match_status'] == 'MISMATCH' %}
                             Mismatch
+                        {% else %}
+                            Not detected
                         {% endif %}
 
                     </strong>
@@ -621,6 +629,234 @@ Review Application | Identix
 
             </div>
 
+            {% if document['doc_type'] == 'MARKS_CARD' %}
+
+                {% set ocr = document['ocr_result'] %}
+
+                <div class="ocr-review-box markcard-ocr-box">
+
+                    <div class="ocr-review-heading">
+
+                        <div>
+                            <span class="panel-label">MARKS CARD OCR</span>
+                            <h3>Detected information</h3>
+                        </div>
+
+                        {% if ocr and ocr['overall_status'] == 'FAIL' %}
+                            <span class="status-badge status-rejected">
+                                Fail detected
+                            </span>
+                        {% elif ocr and ocr['overall_status'] == 'PASS' %}
+                            <span class="status-badge status-approved">
+                                Detected subjects passed
+                            </span>
+                        {% else %}
+                            <span class="status-badge">
+                                Manual review
+                            </span>
+                        {% endif %}
+
+                    </div>
+
+                    {% if ocr %}
+
+                        {% if ocr['error'] %}
+                            <p class="ocr-error-message">
+                                {{ ocr['error'] }}
+                            </p>
+                        {% endif %}
+
+                        <div class="ocr-result-grid">
+
+                            <div>
+                                <span>Name</span>
+                                <strong>{{ ocr['name'] or 'Not detected' }}</strong>
+                                {% if ocr['comparisons'] %}
+                                    <small class="{% if ocr['comparisons']['name']['student_record'] == 'MISMATCH' %}text-danger{% elif ocr['comparisons']['name']['student_record'] == 'MATCH' %}text-success{% endif %}">
+                                        Student record:
+                                        {{ ocr['comparisons']['name']['student_record'] | replace('_', ' ') | title }}
+                                    </small>
+                                    <small class="{% if ocr['comparisons']['name']['application'] == 'MISMATCH' %}text-danger{% elif ocr['comparisons']['name']['application'] == 'MATCH' %}text-success{% endif %}">
+                                        Application:
+                                        {{ ocr['comparisons']['name']['application'] | replace('_', ' ') | title }}
+                                    </small>
+                                {% endif %}
+                            </div>
+
+                            <div>
+                                <span>USN</span>
+                                <strong>{{ ocr['usn'] or 'Not detected' }}</strong>
+                                {% if ocr['comparisons'] %}
+                                    <small class="{% if ocr['comparisons']['usn']['student_record'] == 'MISMATCH' %}text-danger{% elif ocr['comparisons']['usn']['student_record'] == 'MATCH' %}text-success{% endif %}">
+                                        Student record:
+                                        {{ ocr['comparisons']['usn']['student_record'] | replace('_', ' ') | title }}
+                                    </small>
+                                    <small class="{% if ocr['comparisons']['usn']['application'] == 'MISMATCH' %}text-danger{% elif ocr['comparisons']['usn']['application'] == 'MATCH' %}text-success{% endif %}">
+                                        Application:
+                                        {{ ocr['comparisons']['usn']['application'] | replace('_', ' ') | title }}
+                                    </small>
+                                {% endif %}
+                            </div>
+
+                            <div>
+                                <span>Father name</span>
+                                <strong>{{ ocr['father_name'] or 'Not detected' }}</strong>
+                                {% if ocr['comparisons'] %}
+                                    <small>Student record: Not stored</small>
+                                    <small class="{% if ocr['comparisons']['father_name']['application'] == 'MISMATCH' %}text-danger{% elif ocr['comparisons']['father_name']['application'] == 'MATCH' %}text-success{% endif %}">
+                                        Application:
+                                        {{ ocr['comparisons']['father_name']['application'] | replace('_', ' ') | title }}
+                                    </small>
+                                {% endif %}
+                            </div>
+
+                            <div>
+                                <span>CGPA</span>
+                                <strong>{{ ocr['cgpa'] or 'Not detected' }}</strong>
+                            </div>
+
+                            <div>
+                                <span>SGPA</span>
+                                <strong>{{ ocr['sgpa'] or 'Not detected' }}</strong>
+                            </div>
+
+                        </div>
+
+                        <h4 class="ocr-subject-heading">
+                            Subject results detected
+                        </h4>
+
+                        {% if ocr['subjects'] %}
+
+                            <table class="ocr-subject-table">
+                                <thead>
+                                    <tr>
+                                        <th>Subject</th>
+                                        <th>OCR result</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for subject in ocr['subjects'] %}
+                                        <tr>
+                                            <td>{{ subject['code'] }} — {{ subject['name'] }}</td>
+                                            <td class="{% if subject['status'] == 'FAIL' %}text-danger{% elif subject['status'] == 'PASS' %}text-success{% endif %}">
+                                                {{ subject['status'] | replace('_', ' ') | title }}
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+
+                        {% else %}
+
+                            <p class="empty-inline">
+                                No subject rows could be identified.
+                            </p>
+
+                        {% endif %}
+
+                        <p class="ocr-failed-subjects">
+                            <strong>Failed subjects detected:</strong>
+                            {% if ocr['failed_subjects'] %}
+                                {{ ocr['failed_subjects'] | join(', ') }}
+                            {% elif ocr['overall_status'] == 'PASS' %}
+                                None in the detected subject rows
+                            {% else %}
+                                Not determined
+                            {% endif %}
+                        </p>
+
+                        <p class="ocr-disclaimer">
+                            OCR is advisory; verify every result against the uploaded mark card.
+                        </p>
+
+                    {% else %}
+
+                        <p class="empty-inline">
+                            No OCR result was saved for this mark card.
+                        </p>
+
+                    {% endif %}
+
+                </div>
+
+            {% endif %}
+
+            {% if document['doc_type'] == 'ID_CARD' %}
+
+                {% set ocr = document['ocr_result'] %}
+
+                <div class="ocr-review-box id-card-ocr-box">
+
+                    <div class="ocr-review-heading">
+
+                        <div>
+                            <span class="panel-label">STUDENT ID OCR</span>
+                            <h3>Detected identity</h3>
+                        </div>
+
+                        {% if ocr and ocr['comparisons'] and verification['match_status'] == 'MATCH' %}
+                            <span class="status-badge status-approved">
+                                Identity matched
+                            </span>
+                        {% elif verification['match_status'] == 'MISMATCH' %}
+                            <span class="status-badge status-rejected">
+                                Identity mismatch
+                            </span>
+                        {% else %}
+                            <span class="status-badge">
+                                Manual review
+                            </span>
+                        {% endif %}
+
+                    </div>
+
+                    {% if ocr %}
+
+                        {% if ocr['error'] %}
+                            <p class="ocr-error-message">
+                                {{ ocr['error'] }}
+                            </p>
+                        {% endif %}
+
+                        <div class="ocr-result-grid">
+
+                            <div>
+                                <span>Name</span>
+                                <strong>{{ ocr['name'] or 'Not detected' }}</strong>
+                                {% if ocr['comparisons'] %}
+                                    <small>Student record: {{ ocr['comparisons']['name']['student_record'] | replace('_', ' ') | title }}</small>
+                                    <small>Application: {{ ocr['comparisons']['name']['application'] | replace('_', ' ') | title }}</small>
+                                {% endif %}
+                            </div>
+
+                            <div>
+                                <span>USN</span>
+                                <strong>{{ ocr['usn'] or 'Not detected' }}</strong>
+                                {% if ocr['comparisons'] %}
+                                    <small>Student record: {{ ocr['comparisons']['usn']['student_record'] | replace('_', ' ') | title }}</small>
+                                    <small>Application: {{ ocr['comparisons']['usn']['application'] | replace('_', ' ') | title }}</small>
+                                {% endif %}
+                            </div>
+
+                        </div>
+
+                        <p class="ocr-disclaimer">
+                            OCR is advisory; verify the detected identity against the uploaded ID card.
+                        </p>
+
+                    {% else %}
+
+                        <p class="empty-inline">
+                            No OCR result was saved for this ID card.
+                        </p>
+
+                    {% endif %}
+
+                </div>
+
+            {% endif %}
+
             {% endfor %}
 
         </div>
@@ -672,16 +908,25 @@ Review Application | Identix
             </div>
 
             <h2>
-                Final review
+                {% if verification['status'] == 'UNDER_REVIEW' %}
+                    Final review
+                {% else %}
+                    Decision recorded
+                {% endif %}
             </h2>
 
             <p>
-                Select the appropriate decision. The student will
-                receive the result automatically.
+                {% if verification['status'] == 'UNDER_REVIEW' %}
+                    Select the appropriate decision. The student will
+                    receive the result automatically.
+                {% else %}
+                    This request is closed and its decision cannot be changed.
+                {% endif %}
             </p>
 
         </div>
 
+        {% if verification['status'] == 'UNDER_REVIEW' %}
 
         <div
             id="decision-message"
@@ -786,6 +1031,20 @@ Review Application | Identix
             </div>
 
         </form>
+
+        {% else %}
+
+            <div class="decision-note">
+                <strong>
+                    {{ verification['status'] | replace('_', ' ') | title }}
+                </strong>
+                {% if verification['reviewed_at'] %}
+                    on {{ verification['reviewed_at'] }}
+                {% endif %}
+                — this request can no longer be changed.
+            </div>
+
+        {% endif %}
 
     </section>
 

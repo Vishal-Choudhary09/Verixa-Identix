@@ -3,6 +3,7 @@ import sqlite3
 import uuid
 import json
 import time
+import threading
 
 from datetime import datetime, timedelta
 
@@ -20,7 +21,10 @@ from flask import (
 )
 
 from werkzeug.security import check_password_hash
+from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
+
+from markcard_ocr import is_valid_markcard, read_markcard, read_student_id
 
 
 # =========================================================
@@ -73,6 +77,36 @@ os.makedirs(
 # DATABASE
 # =========================================================
 
+_OCR_SCHEMA_LOCK = threading.Lock()
+_OCR_SCHEMA_READY = False
+
+
+def _ensure_document_ocr_column(conn):
+    global _OCR_SCHEMA_READY
+
+    if _OCR_SCHEMA_READY:
+        return
+
+    with _OCR_SCHEMA_LOCK:
+        if _OCR_SCHEMA_READY:
+            return
+
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(documents)")
+        }
+        if not columns:
+            return
+
+        if "ocr_result" not in columns:
+            conn.execute(
+                "ALTER TABLE documents ADD COLUMN ocr_result TEXT"
+            )
+            conn.commit()
+
+        _OCR_SCHEMA_READY = True
+
+
 def get_db():
 
     conn = sqlite3.connect(
@@ -89,6 +123,8 @@ def get_db():
     conn.execute(
         "PRAGMA busy_timeout = 30000"
     )
+
+    _ensure_document_ocr_column(conn)
 
     return conn
 
@@ -167,6 +203,78 @@ def allowed_file(filename):
     )
 
     return extension in ALLOWED_EXTENSIONS
+
+
+def _normalize_comparison_value(value):
+    return "".join(
+        character.casefold()
+        for character in str(value or "")
+        if character.isalnum()
+    )
+
+
+def _ocr_comparison_status(expected, detected):
+    if not detected:
+        return "NOT_DETECTED"
+
+    return (
+        "MATCH"
+        if _normalize_comparison_value(expected)
+        == _normalize_comparison_value(detected)
+        else "MISMATCH"
+    )
+
+
+def _identity_comparisons(ocr_result, student, submitted):
+    return {
+        "name": {
+            "student_record": _ocr_comparison_status(
+                student["name"],
+                ocr_result.get("name"),
+            ),
+            "application": _ocr_comparison_status(
+                submitted["name"],
+                ocr_result.get("name"),
+            ),
+        },
+        "usn": {
+            "student_record": _ocr_comparison_status(
+                student["usn"],
+                ocr_result.get("usn"),
+            ),
+            "application": _ocr_comparison_status(
+                submitted["usn"],
+                ocr_result.get("usn"),
+            ),
+        },
+    }
+
+
+def _markcard_comparisons(ocr_result, student, submitted):
+    comparisons = _identity_comparisons(ocr_result, student, submitted)
+    comparisons["father_name"] = {
+        "student_record": "NOT_STORED",
+        "application": _ocr_comparison_status(
+            submitted["parent_name"],
+            ocr_result.get("father_name"),
+        ),
+    }
+    return comparisons
+
+
+def _identity_matches(comparisons):
+    return not any(
+        comparisons[field][source] != "MATCH"
+        for field in ("name", "usn")
+        for source in ("student_record", "application")
+    )
+
+
+def _markcard_identity_matches(comparisons):
+    return (
+        _identity_matches(comparisons)
+        and comparisons["father_name"]["application"] != "MISMATCH"
+    )
 
 
 # =========================================================
@@ -859,13 +967,35 @@ def student_verification():
 
             selected_purpose = ""
 
+        resubmission_required = False
+        if selected_purpose:
+            latest_request = db.execute(
+                """
+                SELECT status
+                FROM verifications
+                WHERE student_id = ?
+                  AND purpose = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (
+                    student["id"],
+                    selected_purpose
+                )
+            ).fetchone()
+            resubmission_required = (
+                latest_request is not None
+                and latest_request["status"] == "CORRECTION_REQUIRED"
+            )
+
         db.close()
 
         return render_template(
             "student_verification.html",
             student=student,
             verification_id=verification_id,
-            selected_purpose=selected_purpose
+            selected_purpose=selected_purpose,
+            resubmission_required=resubmission_required
         )
 
 
@@ -893,6 +1023,38 @@ def student_verification():
         return (
             "Please select a valid verification service.",
             400
+        )
+
+    def render_admission_upload_error(message, status=400):
+        latest_request = db.execute(
+            """
+            SELECT status
+            FROM verifications
+            WHERE student_id = ?
+              AND purpose = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (
+                student["id"],
+                purpose
+            )
+        ).fetchone()
+        resubmission_required = (
+            latest_request is not None
+            and latest_request["status"] == "CORRECTION_REQUIRED"
+        )
+        db.close()
+        return (
+            render_template(
+                "student_verification.html",
+                student=student,
+                verification_id=verification_id,
+                selected_purpose="HIGHER_SEMESTER_ADMISSION",
+                resubmission_required=resubmission_required,
+                form_error=message,
+            ),
+            status,
         )
 
 
@@ -1367,12 +1529,8 @@ def student_verification():
 
 
     if not marks_cards:
-
-        db.close()
-
-        return (
-            "Please upload at least one marks card.",
-            400
+        return render_admission_upload_error(
+            "MARKS CARD ERROR: Please upload at least one marks card."
         )
 
 
@@ -1380,12 +1538,8 @@ def student_verification():
         not id_card
         or not id_card.filename
     ):
-
-        db.close()
-
-        return (
-            "Please upload the student ID card.",
-            400
+        return render_admission_upload_error(
+            "ID CARD ERROR: Please upload the student ID card."
         )
 
 
@@ -1394,198 +1548,102 @@ def student_verification():
         if not allowed_file(
             file.filename
         ):
-
-            db.close()
-
-            return (
-                "Marks cards must be PDF, JPG, JPEG or PNG.",
-                400
+            return render_admission_upload_error(
+                "MARKS CARD ERROR: Upload a PDF, JPG, JPEG or PNG file."
             )
 
 
     if not allowed_file(
         id_card.filename
     ):
-
-        db.close()
-
-        return (
-            "ID card must be PDF, JPG, JPEG or PNG.",
-            400
+        return render_admission_upload_error(
+            "ID CARD ERROR: Upload a PDF, JPG, JPEG or PNG file."
         )
 
-
-    # =====================================================
-    # OCR ASSISTANCE
-    # =====================================================
-
-    ocr_name = ""
-    ocr_usn = ""
-
-
-    try:
-
-        import pytesseract
-        from PIL import Image
-
-
-        extension = (
-            id_card.filename
-            .rsplit(".", 1)[-1]
-            .lower()
-        )
-
-
-        if extension in [
-            "png",
-            "jpg",
-            "jpeg"
-        ]:
-
-            id_card.stream.seek(0)
-
-            image = Image.open(
-                id_card.stream
+    markcard_ocr_results = []
+    for file in marks_cards:
+        ocr_result = read_markcard(file)
+        error_type = ocr_result.pop("error_type", None)
+        if error_type:
+            app.logger.warning(
+                "Marks-card OCR failed (%s).",
+                error_type,
             )
 
-            ocr_text = (
-                pytesseract
-                .image_to_string(image)
-            )
-
-
-            lines = [
-                line.strip()
-                for line
-                in ocr_text.splitlines()
-                if line.strip()
-            ]
-
-
-            for line in lines:
-
-                cleaned = (
-                    line
-                    .replace(" ", "")
-                    .upper()
+            if ocr_result.get("ocr_status") == "UNAVAILABLE":
+                return render_admission_upload_error(
+                    "MARKS CARD OCR ERROR: Verification is unavailable because PDF/OCR dependencies are missing. Install the project requirements and restart the app.",
+                    503
                 )
 
+            if error_type == "TesseractNotFoundError":
+                return render_admission_upload_error(
+                    "MARKS CARD OCR ERROR: This file needs image OCR, but Tesseract is not installed. Install Tesseract or upload a searchable PDF.",
+                    503
+                )
 
-                if (
-                    len(cleaned) >= 10
-                    and (
-                        "3BR" in cleaned
-                        or cleaned.startswith("3")
-                    )
-                ):
+        if not is_valid_markcard(ocr_result):
+            return render_admission_upload_error(
+                "MARKS CARD ERROR: This file is not a readable valid grade card. Upload a marks card showing the student's name, USN, CGPA, SGPA, and subjects.",
+            )
 
-                    ocr_usn = cleaned
+        comparisons = _markcard_comparisons(
+            ocr_result,
+            student,
+            {
+                "name": submitted_name,
+                "usn": submitted_usn,
+                "parent_name": parent_name,
+            },
+        )
+        if not _markcard_identity_matches(comparisons):
+            return render_admission_upload_error(
+                "MARKS CARD MISMATCH: The name, USN, or parent name does not match the student record and application. Upload the correct student's marks card.",
+            )
 
-                    break
-
-
-            for line in lines:
-
-                upper = line.upper()
-
-
-                if (
-                    "NAME:" in upper
-                    and ":" in line
-                ):
-
-                    ocr_name = (
-                        line
-                        .split(
-                            ":",
-                            1
-                        )[1]
-                        .strip()
-                    )
-
-                    break
+        ocr_result["comparisons"] = comparisons
+        file.stream.seek(0)
+        markcard_ocr_results.append(ocr_result)
 
 
-    except Exception as error:
+    id_card_ocr_result = read_student_id(id_card)
+    error_type = id_card_ocr_result.pop("error_type", None)
+    if error_type:
+        app.logger.warning("Student ID OCR failed (%s).", error_type)
 
-        print(
-            "OCR warning:",
-            error
+        if id_card_ocr_result.get("ocr_status") == "UNAVAILABLE":
+            return render_admission_upload_error(
+                "ID CARD OCR ERROR: Verification is unavailable because PDF/OCR dependencies are missing. Install the project requirements and restart the app.",
+                503
+            )
+
+        if error_type == "TesseractNotFoundError":
+            return render_admission_upload_error(
+                "ID CARD OCR ERROR: This file needs image OCR, but Tesseract is not installed. Install Tesseract or upload a searchable PDF.",
+                503
+            )
+
+    if not id_card_ocr_result.get("name") or not id_card_ocr_result.get("usn"):
+        return render_admission_upload_error(
+            "ID CARD ERROR: Could not read both the student name and USN. Upload a clear ID card showing both details.",
         )
 
-
-    # =====================================================
-    # MATCH
-    # =====================================================
-
-    registered_usn = (
-        student["usn"]
-        .replace(" ", "")
-        .upper()
+    id_card_ocr_result["comparisons"] = _identity_comparisons(
+        id_card_ocr_result,
+        student,
+        {
+            "name": submitted_name,
+            "usn": submitted_usn,
+        },
     )
-
-    submitted_usn_normalized = (
-        submitted_usn
-        .replace(" ", "")
-        .upper()
-    )
-
-
-    usn_match = (
-        submitted_usn_normalized
-        ==
-        registered_usn
-    )
-
-
-    ocr_usn_match = True
-
-
-    if ocr_usn:
-
-        ocr_usn_match = (
-            ocr_usn
-            .replace(" ", "")
-            .upper()
-            ==
-            registered_usn
+    if not _identity_matches(id_card_ocr_result["comparisons"]):
+        return render_admission_upload_error(
+            "ID CARD MISMATCH: The name or USN does not match the student record and application. Upload the correct student's ID card.",
         )
 
-
-    ocr_name_match = True
-
-
-    if ocr_name:
-
-        registered_name = (
-            student["name"]
-            .strip()
-            .lower()
-        )
-
-        detected_name = (
-            ocr_name
-            .strip()
-            .lower()
-        )
-
-        ocr_name_match = (
-            detected_name in registered_name
-            or
-            registered_name in detected_name
-        )
-
-
-    match_status = (
-        "MATCH"
-        if (
-            usn_match
-            and ocr_usn_match
-            and ocr_name_match
-        )
-        else
-        "MISMATCH"
-    )
+    ocr_name = id_card_ocr_result["name"]
+    ocr_usn = id_card_ocr_result["usn"]
+    match_status = "MATCH"
 
 
     # =====================================================
@@ -1672,7 +1730,9 @@ def student_verification():
     # MARKS CARDS
     # =====================================================
 
-    for file in marks_cards:
+    for file, ocr_result in zip(marks_cards, markcard_ocr_results):
+
+        file.stream.seek(0)
 
         original_name = secure_filename(
             file.filename
@@ -1698,15 +1758,17 @@ def student_verification():
                 verification_id,
                 doc_type,
                 filename,
-                original_name
+                original_name,
+                ocr_result
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 verification_db_id,
                 "MARKS_CARD",
                 stored_name,
-                file.filename
+                file.filename,
+                json.dumps(ocr_result),
             )
         )
 
@@ -1742,15 +1804,17 @@ def student_verification():
             verification_id,
             doc_type,
             filename,
-            original_name
+            original_name,
+            ocr_result
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         """,
         (
             verification_db_id,
             "ID_CARD",
             stored_name,
-            id_card.filename
+            id_card.filename,
+            json.dumps(id_card_ocr_result),
         )
     )
 
@@ -2153,6 +2217,123 @@ def admin_verification_detail(
         (verification_id,)
     ).fetchall()
 
+    verification = dict(verification)
+    reviewed_documents = []
+    for row in documents:
+        document = dict(row)
+        raw_ocr_result = document.get("ocr_result")
+        ocr_result = None
+        should_read_legacy_id = (
+            document["doc_type"] == "ID_CARD"
+            and not raw_ocr_result
+            and verification["purpose"] == "HIGHER_SEMESTER_ADMISSION"
+        )
+
+        if raw_ocr_result:
+            try:
+                decoded_result = json.loads(raw_ocr_result)
+            except json.JSONDecodeError:
+                app.logger.warning(
+                    "Invalid stored OCR result for document %s.",
+                    document["id"],
+                )
+                decoded_result = None
+
+            if isinstance(decoded_result, dict):
+                ocr_result = decoded_result
+            else:
+                ocr_result = {
+                    "error": "Saved OCR results are unavailable.",
+                    "ocr_status": "FAILED",
+                }
+
+        if should_read_legacy_id:
+            id_card_path = os.path.join(
+                UPLOAD_FOLDER,
+                os.path.basename(document["filename"]),
+            )
+            if os.path.isfile(id_card_path):
+                with open(id_card_path, "rb") as stream:
+                    ocr_result = read_student_id(
+                        FileStorage(
+                            stream=stream,
+                            filename=document["original_name"],
+                        )
+                    )
+            else:
+                ocr_result = {
+                    "name": None,
+                    "usn": None,
+                    "error": "The saved ID-card file is not available for OCR.",
+                    "ocr_status": "FAILED",
+                }
+
+            error_type = ocr_result.pop("error_type", None)
+            if error_type:
+                app.logger.warning(
+                    "Legacy student ID OCR failed (%s).",
+                    error_type,
+                )
+
+            db.execute(
+                "UPDATE documents SET ocr_result = ? WHERE id = ?",
+                (json.dumps(ocr_result), document["id"]),
+            )
+
+        if ocr_result is not None and submitted:
+            if document["doc_type"] == "MARKS_CARD":
+                ocr_result["comparisons"] = _markcard_comparisons(
+                    ocr_result,
+                    student,
+                    submitted,
+                )
+            elif document["doc_type"] == "ID_CARD":
+                ocr_result["comparisons"] = _identity_comparisons(
+                    ocr_result,
+                    student,
+                    submitted,
+                )
+
+        if (
+            document["doc_type"] == "ID_CARD"
+            and verification["purpose"] == "HIGHER_SEMESTER_ADMISSION"
+            and ocr_result is not None
+        ):
+            verification["ocr_name"] = ocr_result.get("name")
+            verification["ocr_usn"] = ocr_result.get("usn")
+            if (
+                ocr_result.get("name")
+                and ocr_result.get("usn")
+                and ocr_result.get("comparisons")
+            ):
+                verification["match_status"] = (
+                    "MATCH"
+                    if _identity_matches(ocr_result["comparisons"])
+                    else "MISMATCH"
+                )
+            else:
+                verification["match_status"] = "NOT_DETECTED"
+
+            db.execute(
+                """
+                UPDATE verifications
+                SET ocr_name = ?, ocr_usn = ?, match_status = ?
+                WHERE id = ?
+                """,
+                (
+                    verification["ocr_name"],
+                    verification["ocr_usn"],
+                    verification["match_status"],
+                    verification_id,
+                ),
+            )
+
+        document["ocr_result"] = ocr_result
+        reviewed_documents.append(document)
+
+    documents = reviewed_documents
+    db.commit()
+
 
     audit_logs = db.execute(
         """
@@ -2323,6 +2504,19 @@ def admin_decision(
             404
         )
 
+    if verification["status"] != "UNDER_REVIEW":
+        db.close()
+        message = (
+            "A decision has already been recorded for this request. "
+            "It cannot be changed."
+        )
+        if request.is_json:
+            return jsonify({
+                "success": False,
+                "message": message,
+            }), 409
+        return message, 409
+
 
     # =====================================================
     # AUTO SUCCESS MESSAGE
@@ -2368,6 +2562,7 @@ def admin_decision(
             reviewed_by = ?,
             updated_at = ?
         WHERE id = ?
+          AND status = 'UNDER_REVIEW'
         """,
         (
             decision,
@@ -2386,17 +2581,20 @@ def admin_decision(
 
         db.close()
 
+        message = (
+            "A decision has already been recorded for this request. "
+            "It cannot be changed."
+        )
         if request.is_json:
 
             return jsonify({
                 "success": False,
-                "message":
-                    "The decision could not be saved."
-            }), 500
+                "message": message,
+            }), 409
 
         return (
-            "The decision could not be saved.",
-            500
+            message,
+            409
         )
 
 

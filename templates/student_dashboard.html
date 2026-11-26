@@ -281,7 +281,11 @@ Student Dashboard | Identix
                         class="service-action"
                     >
                         {% if scholarship %}
-                            Submit another request
+                            {% if scholarship['status'] == 'CORRECTION_REQUIRED' %}
+                                Resubmit corrections
+                            {% else %}
+                                Submit another request
+                            {% endif %}
                         {% else %}
                             Start verification
                         {% endif %}
@@ -427,7 +431,11 @@ Student Dashboard | Identix
                         class="service-action"
                     >
                         {% if admission %}
-                            Submit another request
+                            {% if admission['status'] == 'CORRECTION_REQUIRED' %}
+                                Resubmit corrections
+                            {% else %}
+                                Submit another request
+                            {% endif %}
                         {% else %}
                             Start verification
                         {% endif %}
